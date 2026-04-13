@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { connectionStore } from '$lib/stores/connection';
-	import { scan, disconnect } from '$lib/bluetooth/BLEService';
+	import { scan, disconnect, isSupported } from '$lib/bluetooth/BLEService';
+
+	let bluetoothSupported = isSupported();
 
 	const statusColors = {
 		disconnected: '#6b7280',
@@ -52,7 +54,9 @@
 	{/if}
 
 	<div class="actions">
-		{#if $connectionStore.status === 'disconnected'}
+		{#if !bluetoothSupported}
+			<div class="unsupported">Chrome or Edge required for Bluetooth</div>
+		{:else if $connectionStore.status === 'disconnected'}
 			<button class="btn btn-primary" onclick={handleScan}>
 				Scan & Connect
 			</button>
@@ -180,5 +184,15 @@
 	border-radius: 8px;
 	color: #e74c3c;
 	font-size: 0.9rem;
+}
+
+.unsupported {
+	padding: 0.75rem 1rem;
+	background: rgba(243, 156, 18, 0.15);
+	border: 1px solid #f39c12;
+	border-radius: 8px;
+	color: #f39c12;
+	font-size: 0.9rem;
+	text-align: center;
 }
 </style>

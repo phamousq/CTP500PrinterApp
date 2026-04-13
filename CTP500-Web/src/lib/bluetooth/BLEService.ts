@@ -32,12 +32,13 @@ function parseBatteryFromNotify(value: DataView): { level: number; voltage: stri
 }
 
 export async function scan(): Promise<void> {
+	requireBluetooth();
 	activityLogStore.add('info', 'Scanning for printers...');
 	connectionStore.setStatus('scanning');
 	connectionStore.setError(null);
 
 	try {
-		device = await navigator.bluetooth.requestDevice({
+		device = await navigator.bluetooth!.requestDevice({
 			filters: SUPPORTED_NAMES.map(name => ({ name })),
 			optionalServices: [SERVICE_UUID]
 		});
@@ -142,5 +143,11 @@ export async function write(data: Uint8Array): Promise<void> {
 }
 
 export function isSupported(): boolean {
-	return 'bluetooth' in navigator;
+	return typeof navigator !== 'undefined' && 'bluetooth' in navigator && navigator.bluetooth !== null;
+}
+
+export function requireBluetooth(): void {
+	if (!isSupported()) {
+		throw new Error('Web Bluetooth is not supported in this browser. Please use Chrome or Edge.');
+	}
 }

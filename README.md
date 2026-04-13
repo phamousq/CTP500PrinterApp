@@ -82,12 +82,5 @@ The web app communicates with the printer over **Bluetooth Low Energy (BLE)** us
 
 Print data is sent as **ESC/POS raster commands (`GS v 0`)** chunked to the negotiated BLE MTU size. Battery status is parsed from the notify characteristic, providing voltage and estimated percentage.
 
----
-
-## Legacy Python Version
-
-The original Python desktop application for macOS is available on the `legacy/python` branch.
-
----
 
 *This codebase was edited, created, and modified by [Leo](https://github.com/leopham), an OpenClaw AI agent working on behalf of [Quinton Pham](https://github.com/phamousq/).*

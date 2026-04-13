@@ -1,97 +1,51 @@
-// ESC/POS printer commands and utilities
-
-// ESC/POS command constants
-export const ESC = 0x1B;
-export const GS = 0x1D;
+// ESC/POS commands for CTP500 thermal printer
 
 // Initialize printer
-export function initPrinter(): Uint8Array {
-	return new Uint8Array([ESC, 0x40]);
-}
+export const initPrinter = () => new Uint8Array([0x1b, 0x40]); // ESC @
 
-// Print and feed line
-export function feedLine(lines: number = 1): Uint8Array {
-	const cmd = new Uint8Array(3);
-	cmd[0] = ESC;
-	cmd[1] = 0x64;
-	cmd[2] = lines;
-	return cmd;
-}
+// Feed n lines
+export const feedLine = (n: number) => new Uint8Array([0x1b, 0x64, n]); // ESC d n
 
-// Print and carriage return
-export function cr(): Uint8Array {
-	return new Uint8Array([0x0D]);
-}
+// Full cut
+export const fullCut = () => new Uint8Array([0x1d, 0x56, 0x00]); // GS V 0
 
-// Full cut (GS v 0)
-export function fullCut(): Uint8Array {
-	return new Uint8Array([GS, 0x56, 0x00]);
-}
+// Partial cut
+export const partialCut = () => new Uint8Array([0x1d, 0x56, 0x01]); // GS V 1
 
-// Partial cut (GS v 1)
-export function partialCut(): Uint8Array {
-	return new Uint8Array([GS, 0x56, 0x01]);
-}
+// Start raster print sequence
+export const startRaster = () => new Uint8Array([0x1d, 0x49, 0xf0, 0x19]); // GS I 0xF0 0x19
 
-// Set alignment
-export function setAlignment(align: 'left' | 'center' | 'right'): Uint8Array {
-	const val = align === 'center' ? 1 : align === 'right' ? 2 : 0;
-	return new Uint8Array([ESC, 0x61, val]);
-}
+// End raster print sequence
+export const endRaster = () => new Uint8Array([0x0a, 0x0a, 0x0a, 0x9a]);
 
-// Set text size
-export function setTextSize(width: number, height: number): Uint8Array {
-	// Width and height 1-8 (0 = normal, 1 = 2x, etc.)
-	const size = ((width - 1) << 4) | (height - 1);
-	return new Uint8Array([GS, 0x21, size]);
-}
+// Encode text to bytes (simple ASCII for now)
+export const encodeText = (text: string): Uint8Array => {
+  return new TextEncoder().encode(text);
+};
 
-// Set text bold
-export function setBold(enabled: boolean): Uint8Array {
-	return new Uint8Array([ESC, 0x45, enabled ? 0x01 : 0x00]);
-}
+// Combine multiple byte arrays
+export const combine = (...arrays: Uint8Array[]): Uint8Array => {
+  const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const arr of arrays) {
+    result.set(arr, offset);
+    offset += arr.length;
+  }
+  return result;
+};
 
-// Set text underline
-export function setUnderline(enabled: boolean): Uint8Array {
-	return new Uint8Array([ESC, 0x2D, enabled ? 0x01 : 0x00]);
-}
-
-// Encode string as bytes (ASCII + support for basic Latin)
-export function encodeText(text: string): Uint8Array {
-	return new TextEncoder().encode(text);
-}
-
-// Generate raster image command
-// width and height in pixels (must be divisible by 8 for bytes)
-export function rasterImage(width: number, height: number, data: Uint8Array): Uint8Array {
-	const bytesPerLine = Math.ceil(width / 8);
-	const totalBytes = bytesPerLine * height;
-	
-	// GS v 0 - raster print
-	// Format: GS v 0 m xL xH yL yH [data]
-	// m = 0 (normal), xL xH = width bytes (low, high), yL yH = height bytes (low, high)
-	const cmd = new Uint8Array(6 + totalBytes);
-	cmd[0] = GS;
-	cmd[1] = 0x76;
-	cmd[2] = 0x30;
-	cmd[3] = 0x00; // m = 0 (normal)
-	cmd[4] = bytesPerLine & 0xFF; // xL (width in bytes)
-	cmd[5] = (bytesPerLine >> 8) & 0xFF; // xH
-	cmd[6] = height & 0xFF; // yL
-	cmd[7] = (height >> 8) & 0xFF; // yH
-	
-	cmd.set(data, 8);
-	return cmd;
-}
-
-// Combine multiple commands
-export function combine(...commands: Uint8Array[]): Uint8Array {
-	const totalLength = commands.reduce((sum, cmd) => sum + cmd.length, 0);
-	const result = new Uint8Array(totalLength);
-	let offset = 0;
-	for (const cmd of commands) {
-		result.set(cmd, offset);
-		offset += cmd.length;
-	}
-	return result;
-}
+// Build raster image command
+export const rasterImage = (width: number, height: number, data: Uint8Array): Uint8Array => {
+  // GS v 0 - Print raster bit image
+  // m = 0 (normal mode)
+  // xL, xH = width in bytes (little endian)
+  // yL, yH = height in dots (little endian)
+  const widthBytes = Math.ceil(width / 8);
+  return combine(
+    new Uint8Array([0x1d, 0x76, 0x30, 0x00]),
+    new Uint8Array([widthBytes & 0xff, (widthBytes >> 8) & 0xff]),
+    new Uint8Array([height & 0xff, (height >> 8) & 0xff]),
+    data
+  );
+};

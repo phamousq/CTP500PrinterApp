@@ -1,39 +1,47 @@
-// src/context/ActivityLogContext.tsx
+import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
 
-import { createContext, useState, useContext, useCallback, type ReactNode } from 'react';
+export type LogLevel = 'info' | 'success' | 'warning' | 'error';
 
 export interface LogEntry {
+  id: number;
   timestamp: string;
-  type: 'info' | 'warning' | 'error' | 'success';
+  level: LogLevel;
   message: string;
 }
 
-interface ActivityLogContextType {
-  logEntries: LogEntry[];
-  addLogEntry: (type: 'info' | 'warning' | 'error' | 'success', message: string) => void;
+interface ActivityLogContextValue {
+  logs: LogEntry[];
+  addLog: (level: LogLevel, message: string) => void;
+  clearLogs: () => void;
 }
 
-const ActivityLogContext = createContext<ActivityLogContextType | undefined>(undefined);
+const ActivityLogContext = createContext<ActivityLogContextValue | null>(null);
 
-export const ActivityLogProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
+let nextId = 0;
 
-  const addLogEntry = useCallback((type: 'info' | 'warning' | 'error' | 'success', message: string) => {
-    const timestamp = new Date().toLocaleTimeString();
-    setLogEntries(prevEntries => [...prevEntries, { timestamp, type, message }]);
+export function ActivityLogProvider({ children }: { children: ReactNode }) {
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+
+  const addLog = useCallback((level: LogLevel, message: string) => {
+    const now = new Date();
+    const timestamp = now.toLocaleTimeString('en-US', { hour12: false });
+    setLogs(prev => [
+      ...prev,
+      { id: nextId++, timestamp, level, message },
+    ]);
+  }, []);
+
+  const clearLogs = useCallback(() => {
+    setLogs([]);
   }, []);
 
   return (
-    <ActivityLogContext.Provider value={{ logEntries, addLogEntry }}>
+    <ActivityLogContext.Provider value={{ logs, addLog, clearLogs }}>
       {children}
     </ActivityLogContext.Provider>
   );
-};
+}
 
-export const useActivityLog = (): ActivityLogContextType => {
-  const context = useContext(ActivityLogContext);
-  if (context === undefined) {
-    throw new Error('useActivityLog must be used within an ActivityLogProvider');
-  }
-  return context;
-};
+export function useActivityLog(): ActivityLogContextValue | null {
+  return useContext(ActivityLogContext);
+}

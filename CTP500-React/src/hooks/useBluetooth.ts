@@ -1,14 +1,6 @@
-// useBluetooth.ts - React hook for Web Bluetooth API service for CTP500 thermal printer
-
 import { useState, useEffect, useCallback } from 'react';
-
-// CTP500 BLE UUIDs
-const SERVICE_UUID = '49535343-fe7d-4ae5-8fa9-9fafd205e455';
-const WRITE_UUID = '49535343-8841-43f4-a8d4-ecbe34729bb3';
-const NOTIFY_UUID = '49535343-1e4d-4bd9-ba61-23c647249616';
-
-// Supported device names
-const SUPPORTED_NAMES = ['S Blue Printer', 'S Pink Printer', 'S White Printer', 'S Black Printer'];
+import { WRITE_CHAR_UUID, NOTIFY_CHAR_UUID, SERVICE_UUID } from '../services/bluetooth/constants';
+import { useActivityLog } from '../context/ActivityLogContext';
 
 interface ConnectionState {
   device: BluetoothDevice | null;
@@ -16,184 +8,194 @@ interface ConnectionState {
   error: string | null;
   batteryLevel: number | null;
   batteryVoltage: string | null;
+  mtu: number;
 }
 
-interface UseBluetoothResult {
+interface UseBluetoothReturn {
   connection: ConnectionState;
-  isWebBluetoothSupported: boolean;
-  scanForPrinters: () => Promise<void>;
-  disconnectPrinter: () => Promise<void>;
-  writeToPrinter: (data: Uint8Array) => Promise<void>;
+  isSupported: boolean;
+  startScan: () => void;
+  disconnect: () => Promise<void>;
+  writeData: (data: Uint8Array) => Promise<void>;
+  printerName: string | null;
 }
 
-function parseBatteryFromNotify(value: DataView): { level: number; voltage: string } | null {
-  // Printer sends: HV=V1.0A,SV=V1.01,VOLT=4000mv,DPI=384
-  const decoder = new TextDecoder('utf-8');
-  const str = decoder.decode(value);
+const BATT_MIN_MV = 3300;
+const BATT_MAX_MV = 4200;
 
-  const voltMatch = str.match(/VOLT=(\\d+)mv/);
-  if (!voltMatch) return null;
-
-  const voltage = parseInt(voltMatch[1]);
-  // LiPo range: 3300mv = 0%, 4200mv = 100%
-  const level = Math.min(100, Math.max(0, ((voltage - 3300) / 900) * 100));
-
-  return { level: Math.round(level), voltage: `${voltage}mv` };
+function parseBatteryFromNotify(data: DataView): { voltage: string; percentage: number } | null {
+  const text = new TextDecoder('ascii').decode(data.buffer).replace(/\0+$/, '');
+  const match = text.match(/VOLT=(\d+)mv/i);
+  if (match) {
+    const mv = parseInt(match[1], 10);
+    const pct = Math.round(((mv - BATT_MIN_MV) / (BATT_MAX_MV - BATT_MIN_MV)) * 100);
+    return {
+      voltage: `${mv}mv`,
+      percentage: Math.max(0, Math.min(100, pct)),
+    };
+  }
+  return null;
 }
 
-export function useBluetooth(onLog: (type: 'info' | 'warning' | 'error' | 'success', message: string) => void): UseBluetoothResult {
+export function useBluetooth(): UseBluetoothReturn {
+  const { addLog } = useActivityLog()!;
   const [connection, setConnection] = useState<ConnectionState>({
     device: null,
     status: 'disconnected',
     error: null,
     batteryLevel: null,
     batteryVoltage: null,
+    mtu: 23,
   });
+  const [isSupported] = useState(() => 'bluetooth' in navigator);
+  const [server, setServer] = useState<BluetoothRemoteGATTServer | null>(null);
+  const [writeChar, setWriteChar] = useState<BluetoothRemoteGATTCharacteristic | null>(null);
+  const [notifyChar, setNotifyChar] = useState<BluetoothRemoteGATTCharacteristic | null>(null);
+  const [printerName, setPrinterName] = useState<string | null>(null);
 
-  const isWebBluetoothSupported = typeof navigator !== 'undefined' && 'bluetooth' in navigator && navigator.bluetooth !== null;
+  const clearConnection = useCallback(() => {
+    setServer(null);
+    setWriteChar(null);
+    setNotifyChar(null);
+    setPrinterName(null);
+    setConnection(prev => ({
+      ...prev,
+      device: null,
+      status: 'disconnected',
+      mtu: 23,
+    }));
+  }, []);
 
-  let bluetoothDevice: BluetoothDevice | null = null;
-  let gattServer: BluetoothRemoteGATTServer | null = null;
-  let writeCharacteristic: BluetoothRemoteGATTCharacteristic | null = null;
-  let notifyCharacteristic: BluetoothRemoteGATTCharacteristic | null = null;
-
-  const requireBluetooth = useCallback(() => {
-    if (!isWebBluetoothSupported) {
-      throw new Error('Web Bluetooth is not supported in this browser. Please use Chrome or Edge.');
-    }
-  }, [isWebBluetoothSupported]);
-
-  const characteristicValueChangeHandler = useCallback((event: Event) => {
-    const target = event.target as BluetoothRemoteGATTCharacteristic;
-    const parsed = parseBatteryFromNotify(target.value!);
-    if (parsed) {
-      setConnection(prev => ({ ...prev, batteryLevel: parsed.level, batteryVoltage: parsed.voltage }));
-      onLog('info', `Battery: ${parsed.level}% (${parsed.voltage})`);
-    }
-  }, [onLog]);
-
-  const scanForPrinters = useCallback(async () => {
-    requireBluetooth();
-    onLog('info', 'Scanning for printers...');
-    setConnection(prev => ({ ...prev, status: 'scanning', error: null }));
-
-    try {
-      bluetoothDevice = await navigator.bluetooth!.requestDevice({
-        filters: SUPPORTED_NAMES.map(name => ({ name })),
-        optionalServices: [SERVICE_UUID],
-      });
-
-      onLog('info', `Device selected: ${bluetoothDevice.name}`);
-      await connectPrinter();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      if (msg.includes('cancelled') || msg === 'User cancelled') {
-        onLog('warning', 'Scan cancelled by user');
-        setConnection(prev => ({ ...prev, status: 'disconnected' }));
-      } else {
-        onLog('error', `Scan failed: ${msg}`);
-        setConnection(prev => ({ ...prev, error: msg, status: 'disconnected' }));
+  const disconnect = useCallback(async () => {
+    if (server) {
+      try {
+        if (notifyChar) {
+          await notifyChar.stopNotifications();
+        }
+        await server.disconnect();
+      } catch (e) {
+        // Ignore disconnect errors
       }
     }
-  }, [requireBluetooth, onLog]);
+    clearConnection();
+    addLog('info', 'Disconnected from printer');
+  }, [server, notifyChar, clearConnection, addLog]);
 
-  const connectPrinter = useCallback(async () => {
-    if (!bluetoothDevice) {
-      onLog('error', 'No device selected to connect');
+  const handleNotify = useCallback((event: Event) => {
+    const char = event.target as BluetoothRemoteGATTCharacteristic;
+    const data = char.value!;
+    const text = new TextDecoder('ascii').decode(data.buffer).replace(/\0+$/, '');
+    addLog('info', `Printer status: ${text}`);
+
+    const batt = parseBatteryFromNotify(data);
+    if (batt) {
+      setConnection(prev => ({
+        ...prev,
+        batteryVoltage: batt.voltage,
+        batteryLevel: batt.percentage,
+      }));
+    }
+  }, [addLog]);
+
+  const connectToDevice = useCallback(async (device: BluetoothDevice) => {
+    setConnection(prev => ({ ...prev, status: 'connecting', error: null }));
+    addLog('info', `Connecting to ${device.name ?? device.id}...`);
+
+    try {
+      const gatt = device.gatt!;
+      await gatt.connect();
+      const serv = await gatt.getPrimaryService(SERVICE_UUID);
+      const [write, notify] = await Promise.all([
+        serv.getCharacteristic(WRITE_CHAR_UUID),
+        serv.getCharacteristic(NOTIFY_CHAR_UUID),
+      ]);
+
+      setServer(gatt);
+      setWriteChar(write);
+      setNotifyChar(notify);
+      setPrinterName(device.name ?? null);
+
+      // Start notifications for battery/STATUS updates
+      notify.addEventListener('characteristicvaluechanged', handleNotify);
+      await notify.startNotifications();
+
+      // Request printer status
+      await write.writeValueWithResponse(new Uint8Array([0x1e, 0x47, 0x03]));
+
+      setConnection(prev => ({
+        ...prev,
+        device,
+        status: 'connected',
+        mtu: 23,
+      }));
+      addLog('info', `Connected (MTU: 23 bytes)`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setConnection(prev => ({ ...prev, status: 'disconnected', error: msg }));
+      addLog('error', `Connection error: ${msg}`);
+      clearConnection();
+    }
+  }, [handleNotify, addLog, clearConnection]);
+
+  const startScan = useCallback(() => {
+    if (!isSupported) {
+      addLog('error', 'Web Bluetooth not supported in this browser');
       return;
     }
+    setConnection(prev => ({ ...prev, status: 'scanning', error: null }));
+    addLog('info', 'Scanning for compatible printers (10s)...');
 
-    setConnection(prev => ({ ...prev, status: 'connecting' }));
-    onLog('info', 'Connecting to GATT server...');
-
-    try {
-      gattServer = await bluetoothDevice.gatt!.connect();
-      onLog('success', 'GATT connected');
-
-      const service = await gattServer.getPrimaryService(SERVICE_UUID);
-      writeCharacteristic = await service.getCharacteristic(WRITE_UUID);
-      notifyCharacteristic = await service.getCharacteristic(NOTIFY_UUID);
-
-      notifyCharacteristic.addEventListener('characteristicvaluechanged', characteristicValueChangeHandler);
-      await notifyCharacteristic.startNotifications();
-
-      setConnection(prev => ({ ...prev, device: bluetoothDevice, status: 'connected' }));
-      onLog('success', 'Printer connected');
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      onLog('error', `Connection failed: ${msg}`);
-      setConnection(prev => ({ ...prev, error: msg, status: 'disconnected' }));
-    }
-  }, [bluetoothDevice, characteristicValueChangeHandler, onLog]);
-
-  const disconnectPrinter = useCallback(async () => {
-    try {
-      if (notifyCharacteristic) {
-        notifyCharacteristic.removeEventListener('characteristicvaluechanged', characteristicValueChangeHandler);
-        await notifyCharacteristic.stopNotifications();
+    navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'S ' }],
+      optionalServices: [SERVICE_UUID],
+    })
+    .then(device => {
+      addLog('info', `Found: ${device.name}`);
+      connectToDevice(device);
+    })
+    .catch(e => {
+      if (e instanceof Error && e.name !== 'NotFoundError') {
+        const msg = e.message;
+        setConnection(prev => ({ ...prev, status: 'disconnected', error: msg }));
+        addLog('error', `Scan error: ${msg}`);
+      } else {
+        setConnection(prev => ({ ...prev, status: 'disconnected' }));
       }
-      if (gattServer?.connected) {
-        gattServer.disconnect();
-      }
-      onLog('info', 'Disconnected');
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Unknown error';
-      onLog('warning', `Disconnect warning: ${msg}`);
-    } finally {
-      bluetoothDevice = null;
-      gattServer = null;
-      writeCharacteristic = null;
-      notifyCharacteristic = null;
-      setConnection({
-        device: null,
-        status: 'disconnected',
-        error: null,
-        batteryLevel: null,
-        batteryVoltage: null,
-      });
-    }
-  }, [characteristicValueChangeHandler, onLog]);
+    });
+  }, [isSupported, addLog, connectToDevice]);
 
-  const writeToPrinter = useCallback(async (data: Uint8Array) => {
-    if (!writeCharacteristic) {
-      throw new Error('Not connected to printer');
-    }
-
-    const mtu = 182; // default BLE MTU
-    
-    const chunkSize = mtu - 3; // overhead for write-with-response
-    const chunks: Uint8Array[] = [];
+  const writeData = useCallback(async (data: Uint8Array) => {
+    if (!writeChar) throw new Error('Not connected');
+    // Chunk to MTU-3 overhead for write-with-response
+    const mtu = connection.mtu || 23;
+    const chunkSize = Math.max(20, mtu - 3);
+    const totalChunks = Math.ceil(data.length / chunkSize);
 
     for (let i = 0; i < data.length; i += chunkSize) {
-      chunks.push(data.slice(i, i + chunkSize));
+      const chunk = data.slice(i, i + chunkSize);
+      await writeChar.writeValueWithResponse(chunk);
+      if (totalChunks > 10 && Math.floor(i / chunkSize) % 10 === 0) {
+        addLog('info', `Sending... ${Math.min(i + chunkSize, data.length)}/${data.length} bytes`);
+      }
     }
-
-    onLog('info', `Writing ${data.length} bytes in ${chunks.length} chunks...`);
-
-    for (const chunk of chunks) {
-      await writeCharacteristic.writeValue(chunk.buffer as ArrayBuffer);
-    }
-
-    onLog('success', `Sent ${data.length} bytes`);
-  }, [bluetoothDevice, onLog]);
+    addLog('info', `Sent ${data.length} bytes`);
+  }, [writeChar, connection.mtu, addLog]);
 
   useEffect(() => {
-    // Cleanup on unmount
     return () => {
-      if (notifyCharacteristic) {
-        notifyCharacteristic.removeEventListener('characteristicvaluechanged', characteristicValueChangeHandler);
-      }
-      if (gattServer?.connected) {
-        gattServer.disconnect();
+      // Cleanup notifications on unmount
+      if (notifyChar) {
+        notifyChar.removeEventListener('characteristicvaluechanged', handleNotify);
       }
     };
-  }, [gattServer, notifyCharacteristic, characteristicValueChangeHandler]);
+  }, [notifyChar, handleNotify]);
 
   return {
     connection,
-    isWebBluetoothSupported,
-    scanForPrinters,
-    disconnectPrinter,
-    writeToPrinter,
+    isSupported,
+    startScan,
+    disconnect,
+    writeData,
+    printerName,
   };
 }

@@ -1,111 +1,143 @@
-// Image processing using Canvas API - convert to 1-bit mono for thermal printer
-
-const PRINTER_WIDTH = 384; // pixels
+import { PRINTER_WIDTH } from '../bluetooth/constants';
 
 export interface ProcessedImage {
-	width: number;
-	height: number;
-	data: Uint8Array;
+  data: Uint8Array;
+  width: number;
+  height: number;
 }
 
-// Convert image file to 1-bit mono for printing
+// Convert a File to a processed image ready for printing
 export async function processImage(file: File): Promise<ProcessedImage> {
-	return new Promise((resolve, reject) => {
-		const img = new Image();
-		const url = URL.createObjectURL(file);
+  const bitmap = await createImageBitmap(file);
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d')!;
 
-		img.onload = () => {
-			try {
-				// Scale to fit printer width
-				const scale = PRINTER_WIDTH / img.width;
-				const width = PRINTER_WIDTH;
-				const height = Math.round(img.height * scale);
+  // Scale to fit printer width
+  const scale = PRINTER_WIDTH / bitmap.width;
+  const height = Math.round(bitmap.height * scale);
+  canvas.width = PRINTER_WIDTH;
+  canvas.height = height;
 
-				// Create canvas
-				const canvas = document.createElement('canvas');
-				canvas.width = width;
-				canvas.height = height;
-				const ctx = canvas.getContext('2d')!;
+  // White background, draw image
+  ctx.fillStyle = 'white';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
 
-				// Draw image (grayscale helps with mono conversion)
-				ctx.fillStyle = 'white';
-				ctx.fillRect(0, 0, width, height);
-				ctx.drawImage(img, 0, 0, width, height);
+  // Convert to 1-bit (threshold at 128)
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const output = new Uint8Array(Math.ceil(canvas.width / 8) * canvas.height);
 
-				// Get image data
-				const imageData = ctx.getImageData(0, 0, width, height);
-				const mono = imageDataToMono(imageData, width, height);
+  for (let y = 0; y < canvas.height; y++) {
+    for (let x = 0; x < canvas.width; x++) {
+      const idx = (y * canvas.width + x) * 4;
+      const r = imageData.data[idx];
+      const g = imageData.data[idx + 1];
+      const b = imageData.data[idx + 2];
+      const gray = (r * 0.299 + g * 0.587 + b * 0.114) > 128 ? 0 : 255;
+      const byteIdx = y * Math.ceil(canvas.width / 8) + Math.floor(x / 8);
+      const bit = 7 - (x % 8);
+      if (gray === 0) {
+        output[byteIdx] |= (1 << bit);
+      }
+    }
+  }
 
-				URL.revokeObjectURL(url);
-				resolve({ width, height, data: mono });
-			} catch (err) {
-				URL.revokeObjectURL(url);
-				reject(err);
-			}
-		};
+  // Pad width to byte boundary
+  const paddedWidth = Math.ceil(canvas.width / 8) * 8;
+  if (paddedWidth !== canvas.width) {
+    const padded = new Uint8Array(canvas.height * (paddedWidth / 8));
+    for (let y = 0; y < canvas.height; y++) {
+      for (let x = 0; x < canvas.width; x++) {
+        const srcIdx = y * Math.ceil(canvas.width / 8) + Math.floor(x / 8);
+        const dstIdx = y * (paddedWidth / 8) + Math.floor(x / 8);
+        const srcBit = 7 - (x % 8);
+        const dstBit = 7 - (x % paddedWidth);
+        if (srcBit === dstBit) {
+          padded[dstIdx] |= (output[srcIdx] & (1 << srcBit));
+        }
+      }
+    }
+    return { data: padded, width: paddedWidth, height: canvas.height };
+  }
 
-		img.onerror = () => {
-			URL.revokeObjectURL(url);
-			reject(new Error('Failed to load image'));
-		};
-
-		img.src = url;
-	});
+  return { data: output, width: canvas.width, height: canvas.height };
 }
 
-// Convert image data to 1-bit mono (dithering pattern)
-function imageDataToMono(imageData: ImageData, width: number, height: number): Uint8Array {
-	const bytesPerLine = Math.ceil(width / 8);
-	const data = new Uint8Array(bytesPerLine * height);
+// Render text to image using canvas
+export function renderTextToImage(text: string, fontSize = 28): Promise<ProcessedImage> {
+  return new Promise((resolve) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = PRINTER_WIDTH;
+    canvas.height = 5000; // Large enough, will trim
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = 'black';
+    ctx.font = `${fontSize}px Menlo, monospace`;
 
-	for (let y = 0; y < height; y++) {
-		for (let x = 0; x < width; x++) {
-			const idx = (y * width + x) * 4;
-			const r = imageData.data[idx];
-			const g = imageData.data[idx + 1];
-			const b = imageData.data[idx + 2];
+    // Word wrap
+    const lines: string[] = [];
+    for (const rawLine of text.split('\n')) {
+      const words = rawLine.split(' ');
+      let current = '';
+      for (const word of words) {
+        const test = current ? `${current} ${word}` : word;
+        if (ctx.measureText(test).width <= PRINTER_WIDTH) {
+          current = test;
+        } else {
+          if (current) lines.push(current);
+          current = word;
+        }
+      }
+      if (current) lines.push(current);
+    }
 
-			// Simple threshold for black/white
-			// Use luminance: Y = 0.299R + 0.587G + 0.114B
-			const luminance = (0.299 * r + 0.587 * g + 0.114 * b);
-			const isBlack = luminance < 128;
+    let y = fontSize;
+    for (const line of lines) {
+      ctx.fillText(line, 0, y);
+      y += fontSize * 1.2;
+    }
 
-			if (isBlack) {
-				const byteIdx = y * bytesPerLine + Math.floor(x / 8);
-				data[byteIdx] |= (0x80 >> (x % 8));
-			}
-		}
-	}
+    // Trim whitespace
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    let minY = 0, maxY = canvas.height;
+    outer: for (let y2 = 0; y2 < canvas.height; y2++) {
+      for (let x = 0; x < canvas.width; x++) {
+        if (imageData.data[(y2 * canvas.width + x) * 4] < 128) {
+          minY = y2;
+          break outer;
+        }
+      }
+    }
+    outer2: for (let y2 = canvas.height - 1; y2 >= 0; y2--) {
+      for (let x = 0; x < canvas.width; x++) {
+        if (imageData.data[(y2 * canvas.width + x) * 4] < 128) {
+          maxY = y2;
+          break outer2;
+        }
+      }
+    }
 
-	return data;
-}
+    const trimmed = ctx.getImageData(0, minY, canvas.width, maxY - minY + 10);
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = canvas.width;
+    outCanvas.height = trimmed.height;
+    outCanvas.getContext('2d')!.putImageData(trimmed, 0, 0);
 
-// Generate thumbnail for preview
-export function generateThumbnail(file: File, maxSize: number): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const img = new Image();
-		const url = URL.createObjectURL(file);
+    // Convert to 1-bit
+    const result = new Uint8Array(Math.ceil(canvas.width / 8) * trimmed.height);
+    for (let y2 = 0; y2 < trimmed.height; y2++) {
+      for (let x = 0; x < canvas.width; x++) {
+        const idx = y2 * canvas.width + x;
+        const gray = trimmed.data[idx * 4] < 128 ? 0 : 255;
+        const byteIdx = Math.floor(x / 8);
+        const bit = 7 - (x % 8);
+        if (gray === 0) {
+          result[y2 * Math.ceil(canvas.width / 8) + byteIdx] |= (1 << bit);
+        }
+      }
+    }
 
-		img.onload = () => {
-			const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
-			const w = Math.round(img.width * scale);
-			const h = Math.round(img.height * scale);
-
-			const canvas = document.createElement('canvas');
-			canvas.width = w;
-			canvas.height = h;
-			const ctx = canvas.getContext('2d')!;
-			ctx.drawImage(img, 0, 0, w, h);
-
-			URL.revokeObjectURL(url);
-			resolve(canvas.toDataURL('image/png'));
-		};
-
-		img.onerror = () => {
-			URL.revokeObjectURL(url);
-			reject(new Error('Failed to load image'));
-		};
-
-		img.src = url;
-	});
+    resolve({ data: result, width: canvas.width, height: trimmed.height });
+  });
 }

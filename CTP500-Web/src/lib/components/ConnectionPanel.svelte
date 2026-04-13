@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { connectionStore } from '$lib/stores/connection';
+	import { activityLogStore } from '$lib/stores/activityLog';
 	import { scan, disconnect } from '$lib/bluetooth/BLEService';
 
 	const statusColors = {
@@ -17,7 +18,12 @@
 	};
 
 	async function handleScan() {
-		await scan();
+		try {
+			await scan();
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : 'Scan failed';
+			activityLogStore.add('error', msg);
+		}
 	}
 
 	async function handleDisconnect() {

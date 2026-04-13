@@ -4,15 +4,6 @@
 	import TextPanel from '$lib/components/TextPanel.svelte';
 	import ImagePanel from '$lib/components/ImagePanel.svelte';
 	import ActivityLog from '$lib/components/ActivityLog.svelte';
-	import { isSupported } from '$lib/bluetooth/BLEService';
-	import { activityLogStore } from '$lib/stores/activityLog';
-
-	// Check Bluetooth support on mount
-	$: if (typeof window !== 'undefined') {
-		if (!isSupported()) {
-			activityLogStore.add('warning', 'Web Bluetooth not supported in this browser');
-		}
-	}
 </script>
 
 <svelte:head>
